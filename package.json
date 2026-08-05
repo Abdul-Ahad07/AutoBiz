@@ -1,0 +1,17 @@
+{
+  "name": "autobiz-backend",
+  "version": "1.0.0",
+  "description": "AutoBiz Messenger Webhook Integration",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "axios": "^1.19.0",
+    "dotenv": "^16.6.1",
+    "express": "^4.19.2",
+    "g4f": "^1.4.6",
+    "groq-sdk": "^1.5.0"
+  }
+}
