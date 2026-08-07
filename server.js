@@ -41,7 +41,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_secret_token';
 const OWNER_SENDER_ID = process.env.OWNER_SENDER_ID;
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
-const WHATSAPP_LINK = "[https://wa.me/923056217647](https://wa.me/923056217647)";
+const WHATSAPP_LINK = "https://wa.me/923056217647";
 
 // Session Memory for tracking client requirements
 const userSessions = {};
@@ -62,7 +62,7 @@ RULES:
 5. Always mention that project work starts within 24-48 hours after payment confirmation.
 6. Collect project requirements (features, design, colors) and ask for their WhatsApp Number or Email.
 7. Provide this link for final setup on WhatsApp: ${WHATSAPP_LINK}
-8. STRICT CODE RULE: NEVER output long raw code blocks (like \`\`\`html, \`\`\`css, \`\`\`javascript) in chat messages. Acknowledge requirements, explain features briefly, and ask for WhatsApp/Email so system can auto-generate GitHub repo.`;
+8. STRICT CODE RULE: NEVER output raw code blocks (like \`\`\`html, \`\`\`css, \`\`\`javascript) in chat messages. Explain features briefly and ask for WhatsApp/Email so system can auto-generate GitHub repo.`;
 
 // 10 Specialized Agent Prompts
 const AGENT_PROMPTS = {
@@ -126,11 +126,12 @@ async function generateWebsiteCode(requirements) {
   }
 }
 
-// PUBLIC GITHUB REPOSITORY CREATION
+// PUBLIC GITHUB REPOSITORY + AUTOMATIC 'main' BRANCH DEPLOYMENT
 async function uploadToGitHub(codeFiles) {
   try {
     const repoName = `autobiz-project-${Date.now()}`;
     
+    // 1. Create Public Repo
     const repoRes = await octokit.repos.createForAuthenticatedUser({
       name: repoName,
       description: 'AutoBiz AI Generated Web Project',
@@ -140,6 +141,7 @@ async function uploadToGitHub(codeFiles) {
 
     const owner = repoRes.data.owner.login;
 
+    // Helper function to create files
     const createFile = async (path, content) => {
       await octokit.repos.createOrUpdateFileContents({
         owner,
@@ -150,14 +152,53 @@ async function uploadToGitHub(codeFiles) {
       });
     };
 
+    // 2. Upload Web Files
     await createFile('index.html', codeFiles.index_html || '<!-- HTML Code -->');
     await createFile('style.css', codeFiles.style_css || '/* CSS Code */');
     await createFile('script.js', codeFiles.script_js || '// JS Code');
 
-    return repoRes.data.html_url;
+    // 3. GitHub Action Workflow file (Forces auto-deployment from 'main' branch)
+    const workflowContent = `name: Deploy to GitHub Pages
+on:
+  push:
+    branches: ["main"]
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '.'
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4`;
+    
+    await createFile('.github/workflows/deploy.yml', workflowContent);
+
+    // 4. Configure GitHub Pages API to use 'main' branch directly
+    try {
+      await octokit.repos.createPagesSite({
+        owner,
+        repo: repoName,
+        source: {
+          branch: 'main',
+          path: '/'
+        }
+      });
+    } catch (pagesErr) {
+      console.log("GitHub Pages API Setup Note:", pagesErr.message);
+    }
+
+    const liveSiteUrl = `https://${owner}.github.io/${repoName}/`;
+    return `Repo Link: ${repoRes.data.html_url}\nLive Web Demo: ${liveSiteUrl}`;
   } catch (err) {
     console.error("GitHub Upload Error:", err.response ? err.response.data : err.message);
-    return "GitHub Upload Failed (Ensure GITHUB_TOKEN has 'repo' permissions)";
+    return "GitHub Upload Failed (Check GITHUB_TOKEN permissions)";
   }
 }
 
@@ -169,7 +210,7 @@ async function generateVoiceNote(text, filename) {
 
     const response = await axios({
       method: 'post',
-      url: `[https://api.elevenlabs.io/v1/text-to-speech/$](https://api.elevenlabs.io/v1/text-to-speech/$){voiceId}`,
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
       headers: {
         'xi-api-key': process.env.ELEVENLABS_API_KEY,
         'Content-Type': 'application/json'
@@ -191,7 +232,7 @@ async function generateVoiceNote(text, filename) {
   }
 }
 
-// Generate Response using selected Agent Prompt
+// Generate Response using selected Agent Prompt (With Boss Recognition)
 async function getAgentResponse(userId, intent, userMessage) {
   try {
     if (!userSessions[userId]) {
@@ -203,8 +244,10 @@ async function getAgentResponse(userId, intent, userMessage) {
     }
 
     let systemPrompt = AGENT_PROMPTS[intent];
+    
+    // Boss/Owner Recognition Check
     if (userId === OWNER_SENDER_ID) {
-      systemPrompt = `Aap AutoBiz AI hain aur apne Boss/Owner se baat kar rahe hain. Unhe 'Boss' ya 'Sir' bol kar respect se guide karein. NEVER write raw code blocks in chat. Explain features briefly and ask for WhatsApp/Email to trigger GitHub repo creation. Speak in polite Roman Urdu.`;
+      systemPrompt = `Aap AutoBiz AI hain aur aap apne Boss/Owner se baat kar rahe hain. Unhe 'Boss' ya 'Sir' bol kar respect se guide karein. NEVER output raw code blocks in chat. Explain features briefly and ask for WhatsApp/Email to trigger GitHub repo creation. Speak in polite Roman Urdu.`;
     }
 
     const response = await groq.chat.completions.create({
@@ -228,7 +271,7 @@ async function sendFBMessage(senderId, text) {
   try {
     const safeText = text.length > 1900 ? text.substring(0, 1900) + "\n\n...[Truncated]" : text;
     await axios.post(
-      `[https://graph.facebook.com/v19.0/me/messages?access_token=$](https://graph.facebook.com/v19.0/me/messages?access_token=$){PAGE_ACCESS_TOKEN}`,
+      `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
       {
         recipient: { id: senderId },
         message: { text: safeText }
@@ -243,7 +286,7 @@ async function sendFBMessage(senderId, text) {
 async function sendFBAudio(senderId, audioUrl) {
   try {
     await axios.post(
-      `[https://graph.facebook.com/v19.0/me/messages?access_token=$](https://graph.facebook.com/v19.0/me/messages?access_token=$){PAGE_ACCESS_TOKEN}`,
+      `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
       {
         recipient: { id: senderId },
         message: {
@@ -264,7 +307,7 @@ async function sendFBAudio(senderId, audioUrl) {
 
 // Notify Owner on Messenger
 async function notifyOwner(clientId, contact, requirements, githubUrl) {
-  const alertText = `🚨 NEW HOT LEAD RECEIVED! 🚨\n\n👤 Client ID: ${clientId}\n📞 Contact: ${contact}\n📋 Requirements: ${requirements}\n\n💻 Generated GitHub Code Link:\n${githubUrl}\n\n💡 Note: Price quoted should EXCLUDE Domain & Hosting. Verify payment before project start.`;
+  const alertText = `🚨 NEW HOT LEAD RECEIVED! 🚨\n\n👤 Client ID: ${clientId}\n📞 Contact: ${contact}\n📋 Requirements: ${requirements}\n\n💻 Generated GitHub Code & Live Demo:\n${githubUrl}\n\n💡 Note: Price quoted should EXCLUDE Domain & Hosting. Verify payment before project start.`;
   await sendFBMessage(OWNER_SENDER_ID, alertText);
 }
 
