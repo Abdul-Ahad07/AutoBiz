@@ -125,23 +125,41 @@ async function generateWebsiteCode(requirements) {
   }
 }
 
-// SECURE & PRIVATE GITHUB UPLOAD
+// PUBLIC GITHUB REPOSITORY CREATION
 async function uploadToGitHub(codeFiles) {
   try {
-    const projectTimestamp = new Date().toISOString().split('T')[0];
-    const gist = await octokit.gists.create({
-      description: `AutoBiz Generated Code Project - ${projectTimestamp}`,
-      public: false,
-      files: {
-        'index.html': { content: codeFiles.index_html || '<!-- HTML Code -->' },
-        'style.css': { content: codeFiles.style_css || '/* CSS Code */' },
-        'script.js': { content: codeFiles.script_js || '// JS Code' }
-      }
+    const repoName = `autobiz-project-${Date.now()}`;
+    
+    // 1. Create a new PUBLIC repository under your account
+    const repoRes = await octokit.repos.createForAuthenticatedUser({
+      name: repoName,
+      description: 'AutoBiz AI Generated Web Project',
+      private: false, // Set to false for PUBLIC repository
+      auto_init: true
     });
-    return gist.data.html_url;
+
+    const owner = repoRes.data.owner.login;
+
+    // Helper function to create/update files in repo
+    const createFile = async (path, content) => {
+      await octokit.repos.createOrUpdateFileContents({
+        owner,
+        repo: repoName,
+        path,
+        message: `Add ${path} via AutoBiz AI`,
+        content: Buffer.from(content || '').toString('base64'),
+      });
+    };
+
+    // 2. Upload index.html, style.css, script.js
+    await createFile('index.html', codeFiles.index_html || '<!-- HTML Code -->');
+    await createFile('style.css', codeFiles.style_css || '/* CSS Code */');
+    await createFile('script.js', codeFiles.script_js || '// JS Code');
+
+    return repoRes.data.html_url;
   } catch (err) {
-    console.error("GitHub Upload Error:", err);
-    return "GitHub Upload Failed (Check GITHUB_TOKEN)";
+    console.error("GitHub Upload Error:", err.response ? err.response.data : err.message);
+    return "GitHub Upload Failed (Ensure GITHUB_TOKEN has 'repo' permissions)";
   }
 }
 
@@ -273,7 +291,6 @@ app.post('/webhook', async (req, res) => {
         const webhookEvent = entry.messaging[0];
         const senderId = webhookEvent.sender ? webhookEvent.sender.id : null;
 
-        // OWNER_SENDER_ID check removed here so your own account receives replies during testing
         if (!senderId || !webhookEvent.message || !webhookEvent.message.text) {
           continue;
         }
