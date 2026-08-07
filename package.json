@@ -8,10 +8,11 @@
     "dev": "nodemon server.js"
   },
   "dependencies": {
-    "axios": "^1.19.0",
-    "dotenv": "^16.6.1",
+    "@octokit/rest": "^20.1.1",
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
     "g4f": "^1.4.6",
-    "groq-sdk": "^1.5.0"
+    "groq-sdk": "^0.3.3"
   }
 }
