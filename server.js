@@ -273,7 +273,8 @@ app.post('/webhook', async (req, res) => {
         const webhookEvent = entry.messaging[0];
         const senderId = webhookEvent.sender ? webhookEvent.sender.id : null;
 
-        if (!senderId || senderId === OWNER_SENDER_ID || !webhookEvent.message || !webhookEvent.message.text) {
+        // OWNER_SENDER_ID check removed here so your own account receives replies during testing
+        if (!senderId || !webhookEvent.message || !webhookEvent.message.text) {
           continue;
         }
 
