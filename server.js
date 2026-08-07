@@ -41,7 +41,7 @@ const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_secret_token';
 const OWNER_SENDER_ID = process.env.OWNER_SENDER_ID;
 const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
-const WHATSAPP_LINK = "https://wa.me/923056217647";
+const WHATSAPP_LINK = "[https://wa.me/923056217647](https://wa.me/923056217647)";
 
 // Session Memory for tracking client requirements
 const userSessions = {};
@@ -52,7 +52,7 @@ function formatResponse(content) {
   return `🤖 AutoBiz AI Response:\n\n${content}`;
 }
 
-// Base System Rules with Injected GitHub Username & Strict Behavior
+// Base System Rules with Anti-Code Block Instruction
 const BASE_RULES = `
 RULES:
 1. Speak in polite Urdu/Roman Urdu.
@@ -61,7 +61,8 @@ RULES:
 4. NEVER quote or finalize exact project prices to the client. Tell them developer/owner will provide the exact quotation (which EXCLUDES Domain & Hosting).
 5. Always mention that project work starts within 24-48 hours after payment confirmation.
 6. Collect project requirements (features, design, colors) and ask for their WhatsApp Number or Email.
-7. Provide this link for final setup on WhatsApp: ${WHATSAPP_LINK}`;
+7. Provide this link for final setup on WhatsApp: ${WHATSAPP_LINK}
+8. STRICT CODE RULE: NEVER output long raw code blocks (like \`\`\`html, \`\`\`css, \`\`\`javascript) in chat messages. Acknowledge requirements, explain features briefly, and ask for WhatsApp/Email so system can auto-generate GitHub repo.`;
 
 // 10 Specialized Agent Prompts
 const AGENT_PROMPTS = {
@@ -130,7 +131,6 @@ async function uploadToGitHub(codeFiles) {
   try {
     const repoName = `autobiz-project-${Date.now()}`;
     
-    // Create public repository under user account
     const repoRes = await octokit.repos.createForAuthenticatedUser({
       name: repoName,
       description: 'AutoBiz AI Generated Web Project',
@@ -140,7 +140,6 @@ async function uploadToGitHub(codeFiles) {
 
     const owner = repoRes.data.owner.login;
 
-    // Helper function to upload files
     const createFile = async (path, content) => {
       await octokit.repos.createOrUpdateFileContents({
         owner,
@@ -170,7 +169,7 @@ async function generateVoiceNote(text, filename) {
 
     const response = await axios({
       method: 'post',
-      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
+      url: `[https://api.elevenlabs.io/v1/text-to-speech/$](https://api.elevenlabs.io/v1/text-to-speech/$){voiceId}`,
       headers: {
         'xi-api-key': process.env.ELEVENLABS_API_KEY,
         'Content-Type': 'application/json'
@@ -192,7 +191,7 @@ async function generateVoiceNote(text, filename) {
   }
 }
 
-// Generate Response using selected Agent Prompt (With Owner Check)
+// Generate Response using selected Agent Prompt
 async function getAgentResponse(userId, intent, userMessage) {
   try {
     if (!userSessions[userId]) {
@@ -205,7 +204,7 @@ async function getAgentResponse(userId, intent, userMessage) {
 
     let systemPrompt = AGENT_PROMPTS[intent];
     if (userId === OWNER_SENDER_ID) {
-      systemPrompt = `Aap AutoBiz AI hain aur aap apne Boss/Owner se baat kar rahe hain. Unhe 'Boss' ya 'Sir' bol kar respect se guide karein. Unhe batayein ke system sahi chal raha hai aur clients ko handle karne ke liye ready hai. Speak in polite Roman Urdu.`;
+      systemPrompt = `Aap AutoBiz AI hain aur apne Boss/Owner se baat kar rahe hain. Unhe 'Boss' ya 'Sir' bol kar respect se guide karein. NEVER write raw code blocks in chat. Explain features briefly and ask for WhatsApp/Email to trigger GitHub repo creation. Speak in polite Roman Urdu.`;
     }
 
     const response = await groq.chat.completions.create({
@@ -229,7 +228,7 @@ async function sendFBMessage(senderId, text) {
   try {
     const safeText = text.length > 1900 ? text.substring(0, 1900) + "\n\n...[Truncated]" : text;
     await axios.post(
-      `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+      `[https://graph.facebook.com/v19.0/me/messages?access_token=$](https://graph.facebook.com/v19.0/me/messages?access_token=$){PAGE_ACCESS_TOKEN}`,
       {
         recipient: { id: senderId },
         message: { text: safeText }
@@ -244,7 +243,7 @@ async function sendFBMessage(senderId, text) {
 async function sendFBAudio(senderId, audioUrl) {
   try {
     await axios.post(
-      `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+      `[https://graph.facebook.com/v19.0/me/messages?access_token=$](https://graph.facebook.com/v19.0/me/messages?access_token=$){PAGE_ACCESS_TOKEN}`,
       {
         recipient: { id: senderId },
         message: {
@@ -344,4 +343,3 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ AutoBiz Server running on port ${PORT}`);
 });
-  
