@@ -1,299 +1,325 @@
 require('dotenv').config();
 const express = require('express');
+const axios = require('axios');
 const Groq = require('groq-sdk');
+const { Octokit } = require('@octokit/rest');
 const fs = require('fs');
 const path = require('path');
+
+// --- 1. STARTUP ENV CHECKS (ALL 7 KEYS) ---
+const REQUIRED_ENV = [
+  'GROQ_API_KEY',
+  'GITHUB_TOKEN',
+  'GITHUB_USERNAME',
+  'PAGE_ACCESS_TOKEN',
+  'OWNER_SENDER_ID',
+  'VERIFY_TOKEN',
+  'ELEVENLABS_API_KEY'
+];
+
+const missingEnv = REQUIRED_ENV.filter((key) => !process.env[key]);
+
+if (missingEnv.length > 0) {
+  console.error(`❌ CRITICAL ERROR: Missing environment variables: ${missingEnv.join(', ')}`);
+  process.exit(1);
+}
 
 const app = express();
 app.use(express.json());
 
-// Public folder for serving audio files
-const publicDir = path.join(__dirname, 'public');
-if (!fs.existsSync(publicDir)) {
-  fs.mkdirSync(publicDir, { recursive: true });
+// Audio Server Folder for Hosting Voice Notes
+const audioDir = path.join(__dirname, 'public');
+if (!fs.existsSync(audioDir)) {
+  fs.mkdirSync(audioDir, { recursive: true });
 }
-app.use('/public', express.static(publicDir));
+app.use('/audio', express.static(audioDir));
 
-// Groq SDK Client Initialization
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY
-});
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
 
-// Environment Variables Configuration
-const PORT = process.env.PORT || 3000;
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "Relation@1";
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
-const OWNER_SENDER_ID = process.env.OWNER_SENDER_ID || "37486899594288488";
-const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY || "sk_09013ead49c26c04067271115e078d8c284ce1a1f62809aa";
-const ELEVENLABS_VOICE_ID = process.env.ELEVENLABS_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // Default Voice ID
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || 'my_secret_token';
+const OWNER_SENDER_ID = process.env.OWNER_SENDER_ID;
+const GITHUB_USERNAME = process.env.GITHUB_USERNAME;
+const WHATSAPP_LINK = "https://wa.me/923056217647";
 
-// Global Memory for Owner Instructions
-let activeCustomerRule = "Normal auto-reply mode: Answer customer queries politely and smartly.";
-
-// In-Memory Chat Context (Per User)
+// Session Memory for tracking client requirements
 const userSessions = {};
 
-function getUserHistory(senderId) {
-  if (!userSessions[senderId]) {
-    userSessions[senderId] = [];
-  }
-  return userSessions[senderId];
+// Response Formatter Header
+function formatResponse(content) {
+  if (content.startsWith('🤖 AutoBiz AI Response:')) return content;
+  return `🤖 AutoBiz AI Response:\n\n${content}`;
 }
 
-function saveUserMessage(senderId, role, content) {
-  const history = getUserHistory(senderId);
-  history.push({ role, content });
-  if (history.length > 8) {
-    userSessions[senderId] = history.slice(-8);
-  }
-}
+// Base System Rules with Injected GitHub Username & Strict Behavior
+const BASE_RULES = `
+RULES:
+1. Speak in polite Urdu/Roman Urdu.
+2. Your official agency GitHub username is "${GITHUB_USERNAME}". If client asks for GitHub profile or username, strictly provide "${GITHUB_USERNAME}".
+3. NEVER make fake human promises like "2-3 ghante mein khud bana kar dunga". State that AutoBiz AI system processes requests automatically once contact info is provided.
+4. NEVER quote or finalize exact project prices to the client. Tell them developer/owner will provide the exact quotation (which EXCLUDES Domain & Hosting).
+5. Always mention that project work starts within 24-48 hours after payment confirmation.
+6. Collect project requirements (features, design, colors) and ask for their WhatsApp Number or Email.
+7. Provide this link for final setup on WhatsApp: ${WHATSAPP_LINK}`;
 
-// 🎙️ 1. Speech-to-Text via Groq Whisper AI
-async function transcribeVoiceMessage(audioUrl) {
+// 10 Specialized Agent Prompts
+const AGENT_PROMPTS = {
+  web_dev: `Aap Web Development Agent hain. Website design, HTML/CSS/JavaScript, React.js aur technical queries par professional guide karein. ${BASE_RULES}`,
+  social_media: `Aap Social Media Agent hain. SMM strategy, Instagram/Facebook management aur brand organic growth par mashwara dein. ${BASE_RULES}`,
+  graphic_design: `Aap Graphic Design Agent hain. Branding, UI/UX, logos aur visual identity services ke hawale se client se baat karein. ${BASE_RULES}`,
+  ecommerce: `Aap E-commerce & Dropshipping Agent hain. Online stores, product listing aur dropshipping setups ke hawale se help karein. ${BASE_RULES}`,
+  content_writing: `Aap Content & Copywriting Agent hain. Ad captions, website copy aur blog content services explain karein. ${BASE_RULES}`,
+  seo: `Aap SEO Specialist Agent hain. Search Engine Optimization, website ranking aur keyword strategy par guidance dein. ${BASE_RULES}`,
+  automation: `Aap AI & Automation Agent hain. Facebook Messenger chatbots, webhooks aur workflow automations explain karein. ${BASE_RULES}`,
+  lead_gen: `Aap Lead Generation Agent hain. Targeted ads campaigns, sales funnels aur business leads ke tarike batayein. ${BASE_RULES}`,
+  pricing: `Aap Pricing Agent hain. Service features explain karein lekin batayein ke custom quotation owner WhatsApp par dega (excluding Domain & Hosting). ${BASE_RULES}`,
+  general: `Aap AutoBiz AI Support Agent hain. Client queries ka polite, helpful aur accurate Urdu/Roman-Urdu mein jawab dein. ${BASE_RULES}`
+};
+
+// Router Agent: Classifies message into 1 of the 10 categories
+async function classifyIntent(userMessage) {
   try {
-    const response = await fetch(audioUrl);
-    const arrayBuffer = await response.arrayBuffer();
-    const buffer = Buffer.from(arrayBuffer);
-    const file = await Groq.toFile(buffer, 'voice_message.mp4');
+    const response = await groq.chat.completions.create({
+      messages: [
+        {
+          role: 'system',
+          content: `Classify the user message into exactly ONE of these categories: 'web_dev', 'social_media', 'graphic_design', 'ecommerce', 'content_writing', 'seo', 'automation', 'lead_gen', 'pricing', or 'general'. Return ONLY the exact key string and nothing else.`
+        },
+        { role: 'user', content: userMessage }
+      ],
+      model: 'llama-3.3-70b-versatile',
+      temperature: 0.1,
+    });
+    
+    const intent = response.choices[0]?.message?.content?.trim().toLowerCase();
+    return AGENT_PROMPTS[intent] ? intent : 'general';
+  } catch (err) {
+    console.error('Routing Error:', err);
+    return 'general';
+  }
+}
 
-    const transcription = await groq.audio.transcriptions.create({
-      file: file,
-      model: "whisper-large-v3-turbo",
-      response_format: "json"
+// AI Code Generator for Web Development Requests
+async function generateWebsiteCode(requirements) {
+  try {
+    const prompt = `You are an expert Frontend Web Developer. Generate a complete working HTML, CSS, and JS structure based on these requirements: "${requirements}". 
+    Return ONLY a JSON object with keys: "index_html", "style_css", "script_js".`;
+
+    const response = await groq.chat.completions.create({
+      messages: [{ role: 'user', content: prompt }],
+      model: 'llama-3.3-70b-versatile',
+      response_format: { type: "json_object" },
+      temperature: 0.2,
     });
 
-    return transcription.text;
-  } catch (error) {
-    console.error("❌ Whisper STT Error:", error.message || error);
-    return null;
+    const rawContent = response.choices[0]?.message?.content || '{}';
+    return JSON.parse(rawContent);
+  } catch (err) {
+    console.error("Code Generation Error:", err);
+    return {
+      "index_html": "<!-- Code Generation Failed -->",
+      "style_css": "/* CSS */",
+      "script_js": "// JS"
+    };
   }
 }
 
-// 🗣️ 2. Text-to-Speech via ElevenLabs API (With Safe Fallback)
-async function generateVoiceNote(text, senderId) {
-  const url = `https://api.elevenlabs.io/v1/text-to-speech/${ELEVENLABS_VOICE_ID}`;
-
+// SECURE & PRIVATE GITHUB UPLOAD
+async function uploadToGitHub(codeFiles) {
   try {
-    const response = await fetch(url, {
-      method: 'POST',
+    const projectTimestamp = new Date().toISOString().split('T')[0];
+    const gist = await octokit.gists.create({
+      description: `AutoBiz Generated Code Project - ${projectTimestamp}`,
+      public: false,
+      files: {
+        'index.html': { content: codeFiles.index_html || '<!-- HTML Code -->' },
+        'style.css': { content: codeFiles.style_css || '/* CSS Code */' },
+        'script.js': { content: codeFiles.script_js || '// JS Code' }
+      }
+    });
+    return gist.data.html_url;
+  } catch (err) {
+    console.error("GitHub Upload Error:", err);
+    return "GitHub Upload Failed (Check GITHUB_TOKEN)";
+  }
+}
+
+// ELEVENLABS VOICE GENERATOR
+async function generateVoiceNote(text, filename) {
+  try {
+    const cleanText = text.replace('🤖 AutoBiz AI Response:\n\n', '');
+    const voiceId = "21m00Tcm4TlvDq8ikWAM";
+
+    const response = await axios({
+      method: 'post',
+      url: `https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`,
       headers: {
-        'Accept': 'audio/mpeg',
-        'Content-Type': 'application/json',
-        'xi-api-key': ELEVENLABS_API_KEY
+        'xi-api-key': process.env.ELEVENLABS_API_KEY,
+        'Content-Type': 'application/json'
       },
-      body: JSON.stringify({
-        text: text,
-        model_id: 'eleven_multilingual_v2',
-        voice_settings: {
-          stability: 0.5,
-          similarity_boost: 0.75
-        }
-      })
+      data: {
+        text: cleanText,
+        model_id: "eleven_multilingual_v2",
+        voice_settings: { stability: 0.5, similarity_boost: 0.75 }
+      },
+      responseType: 'arraybuffer'
     });
 
-    if (!response.ok) {
-      if (response.status === 402) {
-        console.error("⚠️ ElevenLabs Quota Exhausted (Error 402). Falling back to Text Reply.");
-      } else {
-        console.error(`❌ ElevenLabs API Error Status: ${response.status}`);
-      }
-      return null; // Null return hone par automatic text message send hoga
-    }
-
-    const buffer = await response.arrayBuffer();
-    const fileName = `voice_${senderId}_${Date.now()}.mp3`;
-    const filePath = path.join(publicDir, fileName);
-    fs.writeFileSync(filePath, Buffer.from(buffer));
-
-    return fileName;
-  } catch (error) {
-    console.error("❌ ElevenLabs TTS Exception:", error.message || error);
-    return null;
+    const filePath = path.join(audioDir, filename);
+    fs.writeFileSync(filePath, response.data);
+    return true;
+  } catch (err) {
+    console.error("ElevenLabs Audio Error:", err.response ? err.response.data : err.message);
+    return false;
   }
 }
 
-// 🧠 3. Smart Natural Groq AI Engine
-async function getGroqReply(senderId, userMessage, isOwner) {
-  const history = getUserHistory(senderId);
-
-  // OWNER PROMPT
-  const ownerSystemPrompt = {
-    role: "system",
-    content: `You are texting on Messenger as a real human handling AutoBiz for your Boss, Sir Abdul Ahad.
-
-PERSONA & RULES FOR BOSS:
-1. Always address him respectfully as 'Sir' or 'Sir Abdul Ahad'.
-2. Use everyday natural Roman Urdu mixed with light English (e.g., "Ji Sir bilkul", "Done ho gaya Sir", "Tension na lein").
-3. Keep replies short, precise, and direct (1-2 sentences).
-4. If Sir Abdul Ahad gives an instruction for customers (e.g., "agar koi msg kare to 2 ghante baad ka bolo"), acknowledge his order clearly.`
-  };
-
-  // CUSTOMER PROMPT
-  const customerSystemPrompt = {
-    role: "system",
-    content: `You are texting on Messenger as a real human representative for AutoBiz (owned by Sir Abdul Ahad).
-
-STRICT HUMAN TEXTING RULES:
-1. Talk EXACTLY like a normal Pakistani texting on Messenger/WhatsApp using natural Roman Urdu and light English.
-2. NEVER sound like an AI, customer service script, or formal bot. Absolutely NO Hindi words.
-3. Keep it short (1-2 sentences max), relaxed, smart, and direct to the point.
-4. If asked about owner/creator, reply: "Mere owner Sir Abdul Ahad hain."
-
-CURRENT ACTIVE DIRECTION FROM BOSS:
-"${activeCustomerRule}"`
-  };
-
-  const systemPrompt = isOwner ? ownerSystemPrompt : customerSystemPrompt;
-
-  const fullMessages = [
-    systemPrompt,
-    ...history,
-    { role: "user", content: userMessage }
-  ];
-
+// Generate Response using selected Agent Prompt
+async function getAgentResponse(userId, intent, userMessage) {
   try {
-    const chatCompletion = await groq.chat.completions.create({
-      messages: fullMessages,
-      model: "llama-3.3-70b-versatile",
-      temperature: 0.5,
-      max_tokens: 80
-    });
-
-    const aiReply = chatCompletion.choices[0]?.message?.content?.trim();
-
-    if (aiReply) {
-      if (isOwner) {
-        const lowerMsg = userMessage.toLowerCase();
-        if (lowerMsg.includes("ghante") || lowerMsg.includes("ghnte") || lowerMsg.includes("baad") || lowerMsg.includes("bolna") || lowerMsg.includes("busy")) {
-          activeCustomerRule = `Owner Sir Abdul Ahad's custom rule: ${userMessage}`;
-          console.log(`📌 Updated Active Rule: "${activeCustomerRule}"`);
-        }
-      }
-
-      saveUserMessage(senderId, "user", userMessage);
-      saveUserMessage(senderId, "assistant", aiReply);
-      return aiReply;
+    if (!userSessions[userId]) {
+      userSessions[userId] = { requirements: '', codeGenerated: false };
+    }
+    
+    if (userSessions[userId].requirements.length < 1500) {
+      userSessions[userId].requirements += " " + userMessage;
     }
 
-    return isOwner ? "Ji Sir!" : "Ji bilkul!";
-  } catch (error) {
-    console.error("❌ Groq AI Error:", error.message || error);
-    return isOwner ? "Ji Sir!" : "Ji bilkul!";
+    const systemPrompt = AGENT_PROMPTS[intent];
+    const response = await groq.chat.completions.create({
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userMessage }
+      ],
+      model: 'llama-3.3-70b-versatile',
+    });
+
+    const reply = response.choices[0]?.message?.content || "Shukriya! Aap ki details note kar li gayi hain.";
+    return formatResponse(reply);
+  } catch (err) {
+    console.error('Groq Generation Error:', err);
+    return formatResponse(`Maazrat, abhi apke paigham ka jawab dene mein dushwari ho rahi hai. Direct WhatsApp par rabta karein: ${WHATSAPP_LINK}`);
   }
 }
 
-// 📤 4. Meta Messenger API Send Helpers
-async function sendMetaTextMessage(senderId, text) {
-  if (!PAGE_ACCESS_TOKEN) return;
-  await fetch(`https://graph.facebook.com/v21.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      recipient: { id: senderId },
-      message: { text: text }
-    })
-  });
+// Send Text Message via FB API
+async function sendFBMessage(senderId, text) {
+  try {
+    const safeText = text.length > 1900 ? text.substring(0, 1900) + "\n\n...[Truncated]" : text;
+    await axios.post(
+      `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+      {
+        recipient: { id: senderId },
+        message: { text: safeText }
+      }
+    );
+  } catch (err) {
+    console.error('Facebook Send API Error:', err.response ? err.response.data : err.message);
+  }
 }
 
-async function sendMetaAudioMessage(senderId, audioPublicUrl) {
-  if (!PAGE_ACCESS_TOKEN) return;
-  await fetch(`https://graph.facebook.com/v21.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      recipient: { id: senderId },
-      message: {
-        attachment: {
-          type: "audio",
-          payload: {
-            url: audioPublicUrl,
-            is_reusable: true
+// Send Voice Note Attachment via FB API
+async function sendFBAudio(senderId, audioUrl) {
+  try {
+    await axios.post(
+      `https://graph.facebook.com/v19.0/me/messages?access_token=${PAGE_ACCESS_TOKEN}`,
+      {
+        recipient: { id: senderId },
+        message: {
+          attachment: {
+            type: 'audio',
+            payload: {
+              url: audioUrl,
+              is_reusable: true
+            }
           }
         }
       }
-    })
-  });
+    );
+  } catch (err) {
+    console.error('Facebook Audio Send Error:', err.response ? err.response.data : err.message);
+  }
 }
 
-// Webhook Verification (GET)
+// Notify Owner on Messenger
+async function notifyOwner(clientId, contact, requirements, githubUrl) {
+  const alertText = `🚨 NEW HOT LEAD RECEIVED! 🚨\n\n👤 Client ID: ${clientId}\n📞 Contact: ${contact}\n📋 Requirements: ${requirements}\n\n💻 Generated GitHub Code Link:\n${githubUrl}\n\n💡 Note: Price quoted should EXCLUDE Domain & Hosting. Verify payment before project start.`;
+  await sendFBMessage(OWNER_SENDER_ID, alertText);
+}
+
+// Webhook Verification
 app.get('/webhook', (req, res) => {
   const mode = req.query['hub.mode'];
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
-    console.log('✅ WEBHOOK_VERIFIED');
-    return res.status(200).send(challenge);
+  if (mode && token === VERIFY_TOKEN) {
+    res.status(200).send(challenge);
+  } else {
+    res.sendStatus(403);
   }
-  return res.sendStatus(403);
 });
 
-// Webhook Incoming Messages (POST)
+// Main Webhook Receiver
 app.post('/webhook', async (req, res) => {
-  try {
-    const messaging = req.body.entry?.[0]?.messaging?.[0];
+  const body = req.body;
 
-    // Ignore page echo loops
-    if (messaging && messaging.message && messaging.message.is_echo) {
-      return res.status(200).send('EVENT_RECEIVED');
-    }
+  if (body.object === 'page') {
+    res.status(200).send('EVENT_RECEIVED');
 
-    if (messaging && messaging.sender && messaging.message) {
-      const senderId = messaging.sender.id;
-      const isOwner = senderId === OWNER_SENDER_ID;
-      let userMessage = messaging.message.text;
-      let isVoiceInput = false;
+    for (const entry of body.entry) {
+      if (entry.messaging && entry.messaging[0]) {
+        const webhookEvent = entry.messaging[0];
+        const senderId = webhookEvent.sender ? webhookEvent.sender.id : null;
 
-      // 🎙️ Voice Message Input Check
-      const attachments = messaging.message.attachments;
-      if (attachments && attachments[0] && attachments[0].type === 'audio') {
-        isVoiceInput = true;
-        const audioUrl = attachments[0].payload.url;
-        console.log(`🎙️ Incoming Voice Message from ${senderId}...`);
-
-        const transcribedText = await transcribeVoiceMessage(audioUrl);
-        if (transcribedText) {
-          userMessage = transcribedText;
-          console.log(`📝 Transcribed Text: "${userMessage}"`);
-        } else {
-          userMessage = "Voice message clear nahi tha.";
+        if (!senderId || senderId === OWNER_SENDER_ID || !webhookEvent.message || !webhookEvent.message.text) {
+          continue;
         }
-      }
 
-      if (userMessage) {
-        console.log(`📩 Processing message from ${senderId} ${isOwner ? '(OWNER)' : '(CUSTOMER)'}: "${userMessage}"`);
+        const userMsg = webhookEvent.message.text;
 
-        const replyText = await getGroqReply(senderId, userMessage, isOwner);
-        console.log(`🤖 AI Reply Text: "${replyText}"`);
+        (async () => {
+          // 1. Route Intent
+          const intent = await classifyIntent(userMsg);
 
-        if (isVoiceInput) {
-          // Voice Input -> Try Voice Output via ElevenLabs
-          console.log("🔊 Generating ElevenLabs Voice Note...");
-          const audioFileName = await generateVoiceNote(replyText, senderId);
+          // 2. Generate Text Reply
+          const botReply = await getAgentResponse(senderId, intent, userMsg);
 
-          if (audioFileName) {
-            const protocol = req.headers['x-forwarded-proto'] || 'https';
-            const audioPublicUrl = `${protocol}://${req.headers.host}/public/${audioFileName}`;
-            console.log(`🚀 Sending Voice Note URL: ${audioPublicUrl}`);
-            await sendMetaAudioMessage(senderId, audioPublicUrl);
-          } else {
-            // Safe Fallback: Send Text if ElevenLabs fails or quota ends
-            console.log("💬 Sending Text Fallback Reply...");
-            await sendMetaTextMessage(senderId, replyText);
+          // 3. Send Text Response to User
+          await sendFBMessage(senderId, botReply);
+
+          // 4. Generate & Send ElevenLabs Voice Note
+          const reqHost = req.headers.host || 'your-render-app.onrender.com';
+          const protocol = req.protocol || 'https';
+          const audioFilename = `vn_${Date.now()}_${senderId}.mp3`;
+          
+          const audioSuccess = await generateVoiceNote(botReply, audioFilename);
+          if (audioSuccess) {
+            const publicAudioUrl = `${protocol}://${reqHost}/audio/${audioFilename}`;
+            await sendFBAudio(senderId, publicAudioUrl);
           }
-        } else {
-          // Text Input -> Text Output
-          await sendMetaTextMessage(senderId, replyText);
-        }
+
+          // 5. Check for Contact Info & Trigger Code Generation
+          const isContactInfo = /[0-9]{10,}|@/.test(userMsg);
+          const session = userSessions[senderId] || { requirements: userMsg, codeGenerated: false };
+
+          if (isContactInfo && !session.codeGenerated) {
+            session.codeGenerated = true;
+
+            const codeFiles = await generateWebsiteCode(session.requirements);
+            const githubUrl = await uploadToGitHub(codeFiles);
+            await notifyOwner(senderId, userMsg, session.requirements, githubUrl);
+          }
+        })();
       }
     }
-  } catch (err) {
-    console.error("❌ Webhook Post Exception Error:", err);
+  } else {
+    res.sendStatus(404);
   }
-
-  res.status(200).send('EVENT_RECEIVED');
 });
 
-app.get('/', (req, res) => res.send('AutoBiz Voice & Text Server is Live!'));
-
-app.listen(PORT, () => console.log(`🚀 AutoBiz server running on port ${PORT}`));
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`✅ AutoBiz Server running on port ${PORT}`);
+});
