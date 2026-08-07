@@ -130,17 +130,17 @@ async function uploadToGitHub(codeFiles) {
   try {
     const repoName = `autobiz-project-${Date.now()}`;
     
-    // 1. Create a new PUBLIC repository under your account
+    // Create public repository under user account
     const repoRes = await octokit.repos.createForAuthenticatedUser({
       name: repoName,
       description: 'AutoBiz AI Generated Web Project',
-      private: false, // Set to false for PUBLIC repository
+      private: false,
       auto_init: true
     });
 
     const owner = repoRes.data.owner.login;
 
-    // Helper function to create/update files in repo
+    // Helper function to upload files
     const createFile = async (path, content) => {
       await octokit.repos.createOrUpdateFileContents({
         owner,
@@ -151,7 +151,6 @@ async function uploadToGitHub(codeFiles) {
       });
     };
 
-    // 2. Upload index.html, style.css, script.js
     await createFile('index.html', codeFiles.index_html || '<!-- HTML Code -->');
     await createFile('style.css', codeFiles.style_css || '/* CSS Code */');
     await createFile('script.js', codeFiles.script_js || '// JS Code');
@@ -193,7 +192,7 @@ async function generateVoiceNote(text, filename) {
   }
 }
 
-// Generate Response using selected Agent Prompt
+// Generate Response using selected Agent Prompt (With Owner Check)
 async function getAgentResponse(userId, intent, userMessage) {
   try {
     if (!userSessions[userId]) {
@@ -204,7 +203,11 @@ async function getAgentResponse(userId, intent, userMessage) {
       userSessions[userId].requirements += " " + userMessage;
     }
 
-    const systemPrompt = AGENT_PROMPTS[intent];
+    let systemPrompt = AGENT_PROMPTS[intent];
+    if (userId === OWNER_SENDER_ID) {
+      systemPrompt = `Aap AutoBiz AI hain aur aap apne Boss/Owner se baat kar rahe hain. Unhe 'Boss' ya 'Sir' bol kar respect se guide karein. Unhe batayein ke system sahi chal raha hai aur clients ko handle karne ke liye ready hai. Speak in polite Roman Urdu.`;
+    }
+
     const response = await groq.chat.completions.create({
       messages: [
         { role: 'system', content: systemPrompt },
@@ -341,3 +344,4 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`✅ AutoBiz Server running on port ${PORT}`);
 });
+  
